@@ -16,7 +16,7 @@ pub fn init(alloc: Allocator) !Self {
     try points.resize(100);
 
     var seed: u64 = undefined;
-    try std.os.getrandom(std.mem.asBytes(&seed));
+    try std.posix.getrandom(std.mem.asBytes(&seed));
     var rng = Rng.init(seed);
 
     try generatePoints(&rng, points.items);

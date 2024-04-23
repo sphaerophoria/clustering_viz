@@ -4,26 +4,26 @@ const Server = @import("Server.zig");
 
 const Allocator = std.mem.Allocator;
 
-var sigint_caught = std.atomic.Atomic(bool).init(false);
+var sigint_caught = std.atomic.Value(bool).init(false);
 
 fn shouldQuit() bool {
-    return sigint_caught.load(std.atomic.Ordering.Unordered);
+    return sigint_caught.load(std.builtin.AtomicOrder.unordered);
 }
 
 fn signal_handler(_: c_int) align(1) callconv(.C) void {
-    sigint_caught.store(true, std.atomic.Ordering.Unordered);
+    sigint_caught.store(true, std.builtin.AtomicOrder.unordered);
 }
 
 fn registerSignalHandler() !void {
-    var sa = std.os.Sigaction{
+    var sa = std.posix.Sigaction{
         .handler = .{
             .handler = &signal_handler,
         },
-        .mask = std.os.empty_sigset,
+        .mask = std.posix.empty_sigset,
         .flags = 0,
     };
 
-    try std.os.sigaction(std.os.linux.SIG.INT, &sa, null);
+    try std.posix.sigaction(std.posix.SIG.INT, &sa, null);
 }
 
 const ArgMapping = struct {
@@ -75,7 +75,7 @@ const Args = struct {
         var arena = std.heap.ArenaAllocator.init(child_alloc);
         errdefer arena.deinit();
 
-        var alloc = arena.allocator();
+        const alloc = arena.allocator();
 
         var it = try std.process.argsWithAllocator(alloc);
         const process_name = it.next() orelse "clustering_viz";
@@ -98,7 +98,7 @@ const Args = struct {
                     };
                 },
                 .server_port => {
-                    var port_s = it.next() orelse {
+                    const port_s = it.next() orelse {
                         print_stderr("No argument provided for --server-port", .{});
                         help(process_name);
                     };
@@ -150,7 +150,7 @@ pub fn main() !void {
         }
     }
 
-    var alloc = gpa.allocator();
+    const alloc = gpa.allocator();
 
     var args = try Args.parse(alloc);
     defer args.deinit();

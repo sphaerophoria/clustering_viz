@@ -3,22 +3,19 @@ const App = @import("App.zig");
 const Allocator = std.mem.Allocator;
 const NetAddr = std.net.Address;
 const HttpServer = std.http.Server;
+const TcpServer = std.net.Server;
 const Point = App.Point;
 const Self = @This();
 
 app: *App,
-inner: HttpServer,
+inner: TcpServer,
 alloc: Allocator,
 www_root: ?std.fs.Dir,
 
 pub fn init(alloc: Allocator, app: *App, www_root_path: ?[]const u8, ip: []const u8, port: u16) !Self {
-    var inner = HttpServer.init(alloc, .{
-        .reuse_port = true,
-    });
+    const addy = try NetAddr.parseIp(ip, port);
+    var inner = try addy.listen(.{});
     errdefer inner.deinit();
-
-    var addy = try NetAddr.parseIp(ip, port);
-    try inner.listen(addy);
 
     var www_root: ?std.fs.Dir = null;
     if (www_root_path) |path| {
@@ -39,40 +36,36 @@ pub fn deinit(self: *Self) void {
 
 pub fn run(self: *Self) !void {
     while (true) {
-        var pfd = std.mem.zeroInit(std.os.pollfd, .{});
-        pfd.fd = self.inner.socket.sockfd.?;
-        pfd.events = std.os.POLL.IN;
+        var pfd = std.mem.zeroInit(std.posix.pollfd, .{});
+        pfd.fd = self.inner.stream.handle;
+        pfd.events = std.posix.POLL.IN;
 
-        var pfds = [1]std.os.pollfd{pfd};
-        const num_set = std.os.ppoll(&pfds, null, null) catch |e| {
-            if (e == std.os.PPollError.SignalInterrupt) {
+        var pfds = [1]std.posix.pollfd{pfd};
+        const num_set = std.posix.ppoll(&pfds, null, null) catch |e| {
+            if (e == std.posix.PPollError.SignalInterrupt) {
                 return;
             }
             return e;
         };
-
         std.debug.assert(num_set == 1); // Should have got something
-        var response = try self.inner.accept(.{
-            .allocator = self.alloc,
-        });
-        defer response.deinit();
-        try response.wait();
 
-        self.handleHttpRequest(&response, self.app) catch {};
+        const connection = try self.inner.accept();
+
+        var read_buffer: [4096]u8 = undefined;
+        var server = HttpServer.init(connection, &read_buffer);
+        var request = try server.receiveHead();
+
+        self.handleHttpRequest(&request, self.app) catch {};
     }
 }
 
-fn handleHttpRequest(self: *Self, response: *std.http.Server.Response, app: *App) !void {
-    response.transfer_encoding = .chunked;
-    try response.headers.append("connection", "close");
-
-    const purpose = try UriPurpose.parse(response.request.target);
-
+fn handleHttpRequest(self: *Self, request: *std.http.Server.Request, app: *App) !void {
+    const purpose = try UriPurpose.parse(request.head.target);
     switch (purpose) {
-        .index_html => try self.sendFile(response, "index.html", "text/html"),
-        .index_js => try self.sendFile(response, "index.js", "text/javascript"),
-        .point_data => try sendPoints(response, app),
-        .ignored => try ignoreRequest(response),
+        .index_html => try self.sendFile(request, "index.html", "text/html"),
+        .index_js => try self.sendFile(request, "index.js", "text/javascript"),
+        .point_data => try sendPoints(request, app),
+        .ignored => try ignoreRequest(request),
     }
 }
 
@@ -82,7 +75,6 @@ fn copyFile(response: *HttpServer.Response, reader: anytype) !void {
     }).init();
 
     try fifo.pump(reader, response);
-    try response.finish();
 }
 
 fn embeddedLookup(path: []const u8) ![]const u8 {
@@ -104,18 +96,28 @@ fn embeddedLookup(path: []const u8) ![]const u8 {
     return error.InvalidPath;
 }
 
-fn sendFile(self: *Self, response: *std.http.Server.Response, path: []const u8, content_type: []const u8) !void {
-    try response.headers.append("content-type", content_type);
-    try response.do();
+fn sendFile(self: *Self, request: *HttpServer.Request, path: []const u8, content_type: []const u8) !void {
+    const http_headers = &[_]std.http.Header{
+        .{ .name = "content-type", .value = content_type },
+    };
+
+    var send_buffer: [4096]u8 = undefined;
+
+    var response = request.respondStreaming(.{ .send_buffer = &send_buffer, .respond_options = .{
+        .keep_alive = false,
+        .extra_headers = http_headers,
+    } });
 
     if (self.www_root) |www_root| {
-        try copyFile(response, (try www_root.openFile(path, .{})).reader());
+        try copyFile(&response, (try www_root.openFile(path, .{})).reader());
     } else {
-        var embedded = try embeddedLookup(path);
+        const embedded = try embeddedLookup(path);
         var fbs = std.io.fixedBufferStream(embedded);
-        var html = fbs.reader();
-        try copyFile(response, html);
+        const html = fbs.reader();
+        try copyFile(&response, html);
     }
+
+    try response.end();
 }
 
 fn writePointsJson(writer: anytype, points: []const Point) !void {
@@ -133,12 +135,21 @@ fn writePointsJson(writer: anytype, points: []const Point) !void {
     try json_writer.endArray();
 }
 
-fn sendPoints(response: *std.http.Server.Response, app: *App) !void {
+fn sendPoints(request: *std.http.Server.Request, app: *App) !void {
+    const http_headers = &[_]std.http.Header{
+        .{ .name = "content-type", .value = "application/json" },
+    };
+
+    var send_buffer: [4096]u8 = undefined;
+
+    var response = request.respondStreaming(.{ .send_buffer = &send_buffer, .respond_options = .{
+        .keep_alive = false,
+        .extra_headers = http_headers,
+    } });
+
     try app.rerollPoints();
-    try response.headers.append("content-type", "application/json");
-    try response.do();
     try writePointsJson(response.writer(), app.points.items);
-    try response.finish();
+    try response.end();
 }
 
 const UriPurpose = enum {
@@ -173,9 +184,10 @@ const UriPurpose = enum {
     }
 };
 
-fn ignoreRequest(response: *std.http.Server.Response) !void {
-    response.status = std.http.Status.not_found;
-    try response.do();
-    try response.finish();
+fn ignoreRequest(response: *std.http.Server.Request) !void {
+    try response.respond("", .{
+        .keep_alive = false,
+        .status = .not_found,
+    });
 }
 
