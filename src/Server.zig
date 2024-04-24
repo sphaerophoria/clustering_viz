@@ -1,5 +1,6 @@
 const std = @import("std");
 const App = @import("App.zig");
+const resources = @import("resources");
 const Allocator = std.mem.Allocator;
 const NetAddr = std.net.Address;
 const HttpServer = std.http.Server;
@@ -59,13 +60,24 @@ pub fn run(self: *Self) !void {
     }
 }
 
+fn mimetypeFromPath(p: []const u8) ![]const u8 {
+    if (std.mem.endsWith(u8, p, ".js")) {
+        return "text/javascript";
+    } else if (std.mem.endsWith(u8, p, ".html")) {
+        return "text/html";
+    } else {
+        std.log.err("Unknown mimetype for {s}", .{p});
+        return error.Unknown;
+    }
+}
+
 fn handleHttpRequest(self: *Self, request: *std.http.Server.Request, app: *App) !void {
-    const purpose = try UriPurpose.parse(request.head.target);
-    switch (purpose) {
-        .index_html => try self.sendFile(request, "index.html", "text/html"),
-        .index_js => try self.sendFile(request, "index.js", "text/javascript"),
-        .point_data => try sendPoints(request, app),
-        .ignored => try ignoreRequest(request),
+    if (std.mem.eql(u8, request.head.target, "/points")) {
+        try sendPoints(request, app);
+    } else if (std.mem.eql(u8, request.head.target, "/")) {
+        try self.sendFile(request, "/index.html");
+    } else {
+        try self.sendFile(request, request.head.target);
     }
 }
 
@@ -78,27 +90,19 @@ fn copyFile(response: *HttpServer.Response, reader: anytype) !void {
 }
 
 fn embeddedLookup(path: []const u8) ![]const u8 {
-    const Elem = struct {
-        path: []const u8,
-        data: []const u8,
-    };
-
-    const elems = [_]Elem{
-        .{ .path = "index.html", .data = @embedFile("res/index.html") },
-        .{ .path = "index.js", .data = @embedFile("res/index.js") },
-    };
-
-    for (elems) |elem| {
+    for (resources.resources) |elem| {
         if (std.mem.eql(u8, elem.path, path)) {
             return elem.data;
         }
     }
+    std.log.err("No file {s} embedded in application", .{path});
     return error.InvalidPath;
 }
 
-fn sendFile(self: *Self, request: *HttpServer.Request, path: []const u8, content_type: []const u8) !void {
+fn sendFile(self: *Self, request: *HttpServer.Request, path_abs: []const u8) !void {
+    const path = path_abs[1..];
     const http_headers = &[_]std.http.Header{
-        .{ .name = "content-type", .value = content_type },
+        .{ .name = "content-type", .value = try mimetypeFromPath(path) },
     };
 
     var send_buffer: [4096]u8 = undefined;
@@ -151,43 +155,3 @@ fn sendPoints(request: *std.http.Server.Request, app: *App) !void {
     try writePointsJson(response.writer(), app.points.items);
     try response.end();
 }
-
-const UriPurpose = enum {
-    index_html,
-    index_js,
-    point_data,
-    ignored,
-
-    fn parse(target: []const u8) !UriPurpose {
-        const Mapping = struct {
-            uri: []const u8,
-            purpose: UriPurpose,
-        };
-
-        // zig fmt: off
-        const mappings = [_]Mapping{
-            .{ .uri = "/",            .purpose = .index_html },
-            .{ .uri = "/index.html",  .purpose = .index_html },
-            .{ .uri = "/index.js",    .purpose = .index_js },
-            .{ .uri = "/points",      .purpose = .point_data },
-            .{ .uri = "/favicon.ico", .purpose = .ignored },
-        };
-
-        for (mappings) |mapping| {
-            if (std.mem.eql(u8, target, mapping.uri)) {
-                return mapping.purpose;
-            }
-        }
-
-        std.log.err("Unknown target: {s}", .{target});
-        return error.Unimplemented;
-    }
-};
-
-fn ignoreRequest(response: *std.http.Server.Request) !void {
-    try response.respond("", .{
-        .keep_alive = false,
-        .status = .not_found,
-    });
-}
-
