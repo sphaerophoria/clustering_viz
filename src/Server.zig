@@ -6,6 +6,7 @@ const NetAddr = std.net.Address;
 const HttpServer = std.http.Server;
 const TcpServer = std.net.Server;
 const Point = App.Point;
+const Clusters = App.Clusters;
 const Self = @This();
 
 app: *App,
@@ -83,12 +84,31 @@ fn mimetypeFromPath(p: []const u8) ![]const u8 {
 }
 
 fn handleHttpRequest(self: *Self, request: *std.http.Server.Request, app: *App) !void {
-    if (std.mem.eql(u8, request.head.target, "/points")) {
-        try sendPoints(request, app);
-    } else if (std.mem.eql(u8, request.head.target, "/")) {
-        try self.sendFile(request, "/index.html");
-    } else {
-        try self.sendFile(request, request.head.target);
+    const purpose = UriPurpose.parse(request.head.target) orelse {
+        if (std.mem.eql(u8, request.head.target, "/")) {
+            try self.sendFile(request, "/index.html");
+        } else {
+            try self.sendFile(request, request.head.target);
+        }
+        return;
+    };
+
+    switch (purpose) {
+        .point_data => {
+            try sendData(request, app);
+        },
+        .next => {
+            try app.next();
+            try request.respond("", .{
+                .keep_alive = false,
+            });
+        },
+        .reset => {
+            try app.rerollPoints();
+            try request.respond("", .{
+                .keep_alive = false,
+            });
+        },
     }
 }
 
@@ -135,8 +155,7 @@ fn sendFile(self: *Self, request: *HttpServer.Request, path_abs: []const u8) !vo
     try response.end();
 }
 
-fn writePointsJson(writer: anytype, points: []const Point) !void {
-    var json_writer = std.json.writeStream(writer, .{});
+fn writePointsJson(json_writer: anytype, points: []const Point) !void {
     try json_writer.beginArray();
     for (points) |point| {
         try json_writer.beginObject();
@@ -146,11 +165,63 @@ fn writePointsJson(writer: anytype, points: []const Point) !void {
         try json_writer.write(point.y);
         try json_writer.endObject();
     }
+    try json_writer.endArray();
+}
+
+fn writeClustersJson(json_writer: anytype, clusters: *const Clusters) !void {
+    try json_writer.beginArray();
+    var it = clusters.clusterIt();
+    while (it.next()) |cluster| {
+        try json_writer.beginArray();
+        for (cluster) |point| {
+            try json_writer.write(point);
+        }
+        try json_writer.endArray();
+    }
 
     try json_writer.endArray();
 }
 
-fn sendPoints(request: *std.http.Server.Request, app: *App) !void {
+fn writeDataJson(writer: anytype, points: []const Point, clusters: *const Clusters) !void {
+    var json_writer = std.json.writeStream(writer, .{});
+    try json_writer.beginObject();
+
+    try json_writer.objectField("points");
+    try writePointsJson(&json_writer, points);
+
+    try json_writer.objectField("clusters");
+    try writeClustersJson(&json_writer, clusters);
+
+    try json_writer.endObject();
+}
+
+test "write json data" {
+    const points = [_]Point{
+        .{.x = 1, .y = 1},
+        .{.x = 2, .y = 3},
+        .{.x = 4, .y = 5},
+    };
+
+    var clusters = try Clusters.init(std.testing.allocator);
+    defer clusters.deinit();
+
+    const cluster_1 = try clusters.addCluster();
+    const cluster_2 = try clusters.addCluster();
+
+    try clusters.addToCluster(cluster_1, 1);
+    try clusters.addToCluster(cluster_2, 0);
+    try clusters.addToCluster(cluster_2, 2);
+
+    var serialized = std.ArrayList(u8).init(std.testing.allocator);
+    defer serialized.deinit();
+    try writeDataJson(serialized.writer(), &points, &clusters);
+
+    try std.testing.expectEqualStrings(
+        \\{"points":[{"x":1,"y":1},{"x":2,"y":3},{"x":4,"y":5}],"clusters":[[1],[0,2]]}
+        , serialized.items);
+}
+
+fn sendData(request: *std.http.Server.Request, app: *App) !void {
     const http_headers = &[_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
     };
@@ -162,7 +233,35 @@ fn sendPoints(request: *std.http.Server.Request, app: *App) !void {
         .extra_headers = http_headers,
     } });
 
-    try app.rerollPoints();
-    try writePointsJson(response.writer(), app.points.items);
+    try writeDataJson(response.writer(), app.points.items, &app.clusters);
     try response.end();
 }
+
+const UriPurpose = enum {
+    point_data,
+    next,
+    reset,
+
+    fn parse(target: []const u8) ?UriPurpose {
+        const Mapping = struct {
+            uri: []const u8,
+            purpose: UriPurpose,
+        };
+
+        // zig fmt: off
+        const mappings = [_]Mapping{
+            .{ .uri = "/data",        .purpose = .point_data },
+            .{ .uri = "/next",        .purpose = .next },
+            .{ .uri = "/reset",       .purpose = .reset },
+        };
+
+        for (mappings) |mapping| {
+            if (std.mem.eql(u8, target, mapping.uri)) {
+                return mapping.purpose;
+            }
+        }
+
+        return null;
+    }
+};
+

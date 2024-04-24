@@ -173,3 +173,7 @@ pub fn main() !void {
 
     std.log.info("Caught SIGINT: exiting", .{});
 }
+
+test {
+    std.testing.refAllDeclsRecursive(@This());
+}
