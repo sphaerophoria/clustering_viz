@@ -16,7 +16,9 @@ www_root: ?std.fs.Dir,
 
 pub fn init(alloc: Allocator, app: *App, www_root_path: ?[]const u8, ip: []const u8, port: u16) !Self {
     const addy = try NetAddr.parseIp(ip, port);
-    var inner = try addy.listen(.{});
+    var inner = try addy.listen(.{
+        .reuse_port = true,
+    });
     errdefer inner.deinit();
 
     var www_root: ?std.fs.Dir = null;
@@ -57,7 +59,9 @@ pub fn run(self: *Self) !void {
         var server = HttpServer.init(connection, &read_buffer);
         var request = try server.receiveHead();
 
-        self.handleHttpRequest(&request, self.app) catch {};
+        self.handleHttpRequest(&request, self.app) catch {
+            std.log.err("error handling request", .{});
+        };
     }
 }
 
