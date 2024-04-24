@@ -61,14 +61,25 @@ pub fn run(self: *Self) !void {
 }
 
 fn mimetypeFromPath(p: []const u8) ![]const u8 {
-    if (std.mem.endsWith(u8, p, ".js")) {
-        return "text/javascript";
-    } else if (std.mem.endsWith(u8, p, ".html")) {
-        return "text/html";
-    } else {
-        std.log.err("Unknown mimetype for {s}", .{p});
-        return error.Unknown;
+    const Mapping = struct {
+        ext: []const u8,
+        mime: []const u8,
+    };
+
+    // zig fmt: off
+    const mappings = [_]Mapping{
+        .{ .ext = ".js",   .mime = "text/javascript" },
+        .{ .ext = ".html", .mime = "text/html" },
+    };
+
+    for (mappings) |mapping| {
+        if (std.mem.endsWith(u8, p, mapping.ext)) {
+            return mapping.mime;
+        }
     }
+
+    std.log.err("Unknown mimetype for {s}", .{p});
+    return error.Unknown;
 }
 
 fn handleHttpRequest(self: *Self, request: *std.http.Server.Request, app: *App) !void {
