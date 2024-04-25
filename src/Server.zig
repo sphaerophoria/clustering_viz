@@ -59,7 +59,7 @@ pub fn run(self: *Self) !void {
         var server = HttpServer.init(connection, &read_buffer);
         var request = try server.receiveHead();
 
-        self.handleHttpRequest(&request, self.app) catch {
+        self.handleHttpRequest(&request) catch {
             std.log.err("error handling request", .{});
         };
     }
@@ -87,7 +87,98 @@ fn mimetypeFromPath(p: []const u8) ![]const u8 {
     return error.Unknown;
 }
 
-fn handleHttpRequest(self: *Self, request: *std.http.Server.Request, app: *App) !void {
+const QueryParamIt = struct {
+    query_params: []const u8,
+
+    const Output = struct {
+        key: []const u8,
+        val: []const u8,
+    };
+
+    fn init(target: []const u8) QueryParamIt {
+        const query_param_idx = std.mem.indexOfScalar(u8, target, '?') orelse target.len - 1;
+        return .{
+            .query_params = target[query_param_idx + 1..],
+        };
+    }
+
+    fn next(self: *QueryParamIt) ?Output {
+        const key_end = std.mem.indexOfScalar(u8, self.query_params, '=') orelse {
+            return null;
+        };
+        const val_end = std.mem.indexOfScalar(u8, self.query_params, '&') orelse self.query_params.len;
+        const key = self.query_params[0..key_end];
+        const val = self.query_params[key_end + 1..val_end];
+
+        self.query_params = self.query_params[@min(val_end + 1, self.query_params.len)..];
+
+        return .{
+            .key = key,
+            .val = val,
+        };
+    }
+
+};
+
+fn handleReset(request: *std.http.Server.Request, app: *App) !void {
+    var it = QueryParamIt.init(request.head.target);
+
+    const KeyPurpose = enum {
+        num_elems,
+        num_clusters,
+        cluster_radius,
+        unknown,
+
+        const KeyPurpose = @This();
+
+        fn parse(key: []const u8) KeyPurpose {
+            const Mapping = struct {
+                key: []const u8,
+                purpose: KeyPurpose,
+            };
+
+            const mappings = [_]Mapping{
+                .{ .key = "num_elems", .purpose = .num_elems },
+                .{ .key = "num_clusters", .purpose = .num_clusters },
+                .{ .key = "cluster_radius", .purpose = .cluster_radius },
+            };
+
+            for (mappings) |mapping| {
+                if (std.mem.eql(u8, mapping.key, key)) {
+                    return mapping.purpose;
+                }
+            }
+
+            return .unknown;
+        }
+    };
+
+    var num_elems: usize  = 100;
+    var num_clusters: usize  = 7;
+    var cluster_radius: f32  = 5;
+
+    while (it.next()) |query_param| {
+        switch (KeyPurpose.parse(query_param.key)) {
+            .num_elems => {
+                num_elems = try std.fmt.parseInt(usize, query_param.val, 10);
+            },
+            .num_clusters => {
+                num_clusters = try std.fmt.parseInt(usize, query_param.val, 10);
+            },
+            .cluster_radius => {
+                cluster_radius = try std.fmt.parseFloat(f32, query_param.val);
+            },
+            .unknown => {},
+        }
+    }
+
+    try app.rerollPoints(num_elems, num_clusters, cluster_radius);
+    try request.respond("", .{
+        .keep_alive = false,
+    });
+}
+
+fn handleHttpRequest(self: *Self, request: *std.http.Server.Request) !void {
     const purpose = UriPurpose.parse(request.head.target) orelse {
         if (std.mem.eql(u8, request.head.target, "/")) {
             try self.sendFile(request, "/index.html");
@@ -99,19 +190,16 @@ fn handleHttpRequest(self: *Self, request: *std.http.Server.Request, app: *App) 
 
     switch (purpose) {
         .point_data => {
-            try sendData(request, app);
+            try sendData(request, self.app);
         },
         .next => {
-            try app.next();
+            try self.app.next();
             try request.respond("", .{
                 .keep_alive = false,
             });
         },
         .reset => {
-            try app.rerollPoints();
-            try request.respond("", .{
-                .keep_alive = false,
-            });
+            try handleReset(request, self.app);
         },
     }
 }
@@ -249,19 +337,32 @@ const UriPurpose = enum {
     fn parse(target: []const u8) ?UriPurpose {
         const Mapping = struct {
             uri: []const u8,
+            match_type: enum {
+                begin,
+                exact,
+            } = .exact,
             purpose: UriPurpose,
         };
 
         // zig fmt: off
         const mappings = [_]Mapping{
-            .{ .uri = "/data",        .purpose = .point_data },
-            .{ .uri = "/next",        .purpose = .next },
-            .{ .uri = "/reset",       .purpose = .reset },
+            .{ .uri = "/data",  .purpose = .point_data},
+            .{ .uri = "/next",  .purpose = .next },
+            .{ .uri = "/reset", .purpose = .reset, .match_type = .begin },
         };
 
         for (mappings) |mapping| {
-            if (std.mem.eql(u8, target, mapping.uri)) {
-                return mapping.purpose;
+            switch (mapping.match_type) {
+                .begin => {
+                    if (std.mem.startsWith(u8, target, mapping.uri)) {
+                        return mapping.purpose;
+                    }
+                },
+                .exact => {
+                    if (std.mem.eql(u8, target, mapping.uri)) {
+                        return mapping.purpose;
+                    }
+                }
             }
         }
 

@@ -304,7 +304,7 @@ pub fn init(alloc: Allocator) !Self {
     try std.posix.getrandom(std.mem.asBytes(&seed));
     var rng = Rng.init(seed);
 
-    try generatePoints(&rng, points.items, 7);
+    try generatePoints(&rng, points.items, 5, 5);
 
     var clusters = try Clusters.init(alloc);
     const clusterer = try AgglomerativeClusterer.init(alloc, points.items, &clusters);
@@ -324,8 +324,9 @@ pub fn deinit(self: *Self) void {
     self.points.deinit();
 }
 
-pub fn rerollPoints(self: *Self) !void {
-    try generatePoints(&self.rng, self.points.items, 7);
+pub fn rerollPoints(self: *Self, num_elems: usize, num_clusters: usize, cluster_radius: f32) !void {
+    try self.points.resize(num_elems);
+    try generatePoints(&self.rng, self.points.items, num_clusters, cluster_radius);
 
     // FIXME: Idempotent operations
     self.clusters.deinit();
@@ -339,7 +340,7 @@ pub fn next(self: *Self) !void {
     try self.clusterer.next(&self.clusters);
 }
 
-fn generatePoints(rng: *Rng, items: []Point, num_clusters: usize) !void {
+fn generatePoints(rng: *Rng, items: []Point, num_clusters: usize, cluster_radius: f32) !void {
     const rng_if = rng.random();
 
     const remainder = items.len % num_clusters;
@@ -347,9 +348,8 @@ fn generatePoints(rng: *Rng, items: []Point, num_clusters: usize) !void {
     var item_id: usize = 0;
 
     for (0..num_clusters) |bucket_id| {
-        const bucket_center_x = rng_if.intRangeAtMost(i32, 25, 75);
-        const bucket_center_y = rng_if.intRangeAtMost(i32, 25, 75);
-        std.debug.print("Center point: {d}x{d}\n", .{ bucket_center_x, bucket_center_y });
+        const bucket_center_x: f32 = @floatFromInt(rng_if.intRangeAtMost(i32, 25, 75));
+        const bucket_center_y: f32 = @floatFromInt(rng_if.intRangeAtMost(i32, 25, 75));
         var bucket_elems = num_elems_per_bucket;
         if (bucket_id < remainder) {
             bucket_elems += 1;
@@ -358,11 +358,13 @@ fn generatePoints(rng: *Rng, items: []Point, num_clusters: usize) !void {
         for (0..bucket_elems) |_| {
             const item = &items[item_id];
             item_id += 1;
-            const x = rng_if.intRangeAtMost(i32, -10, 10);
-            const y = rng_if.intRangeAtMost(i32, -10, 10);
+            const r = rng_if.floatNorm(f32) * cluster_radius;
+            const theta = rng_if.float(f32) * 2 * std.math.pi;
+            const x = r * std.math.cos(theta);
+            const y = r * std.math.sin(theta);
             item.* = .{
-                .x = x + bucket_center_x,
-                .y = y + bucket_center_y,
+                .x = @intFromFloat(@round(x) + bucket_center_x),
+                .y = @intFromFloat(@round(y) + bucket_center_y),
             };
         }
     }

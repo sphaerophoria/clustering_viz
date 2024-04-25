@@ -46,7 +46,17 @@ async function next() {
 }
 
 async function reset() {
-  await fetch("/reset");
+  const num_elems = document.getElementById("num-elems").value;
+  const num_clusters = document.getElementById("num-clusters").value;
+  const cluster_radius = document.getElementById("cluster-radius").value;
+  await fetch(
+    "/reset?num_elems=" +
+      num_elems +
+      "&num_clusters=" +
+      num_clusters +
+      "&cluster_radius=" +
+      cluster_radius,
+  );
   await rerender();
 }
 
