@@ -178,6 +178,37 @@ fn handleReset(request: *std.http.Server.Request, app: *App) !void {
     });
 }
 
+fn handleGetClusterers(request: *std.http.Server.Request) !void {
+    const http_headers = &[_]std.http.Header{
+        .{ .name = "content-type", .value = "application/json" },
+    };
+
+    var send_buffer: [4096]u8 = undefined;
+
+    var response = request.respondStreaming(.{ .send_buffer = &send_buffer, .respond_options = .{
+        .keep_alive = false,
+        .extra_headers = http_headers,
+    } });
+
+    var json_writer = std.json.writeStream(response.writer(), .{});
+
+    try json_writer.beginArray();
+    inline for (std.meta.fields(App.ClustererId)) |field| {
+        try json_writer.beginObject();
+
+        try json_writer.objectField("id");
+        try json_writer.write(field.value);
+
+        try json_writer.objectField("name");
+        try json_writer.write(field.name);
+
+        try json_writer.endObject();
+    }
+    try json_writer.endArray();
+
+    try response.end();
+}
+
 fn handleHttpRequest(self: *Self, request: *std.http.Server.Request) !void {
     const purpose = UriPurpose.parse(request.head.target) orelse {
         if (std.mem.eql(u8, request.head.target, "/")) {
@@ -201,6 +232,29 @@ fn handleHttpRequest(self: *Self, request: *std.http.Server.Request) !void {
         .reset => {
             try handleReset(request, self.app);
         },
+        .get_clusterers => {
+            try handleGetClusterers(request);
+        },
+        .set_clusterer => {
+            var it = QueryParamIt.init(request.head.target);
+            var id: ?App.ClustererId = null;
+            while (it.next()) |query_param| {
+                if (std.mem.eql(u8, "id", query_param.key)) {
+                    id = @enumFromInt(try std.fmt.parseInt(u8, query_param.val, 10));
+                }
+
+            }
+
+            const id_final = id orelse {
+                std.log.err("set clusterer called with no id parameter", .{});
+                return error.NoId;
+            };
+
+            try self.app.setClusterer(id_final);
+            try request.respond("", .{
+                .keep_alive = false,
+            });
+        }
     }
 }
 
@@ -333,6 +387,8 @@ const UriPurpose = enum {
     point_data,
     next,
     reset,
+    get_clusterers,
+    set_clusterer,
 
     fn parse(target: []const u8) ?UriPurpose {
         const Mapping = struct {
@@ -349,6 +405,8 @@ const UriPurpose = enum {
             .{ .uri = "/data",  .purpose = .point_data},
             .{ .uri = "/next",  .purpose = .next },
             .{ .uri = "/reset", .purpose = .reset, .match_type = .begin },
+            .{ .uri = "/clusterers", .purpose = .get_clusterers },
+            .{ .uri = "/set_clusterer", .purpose = .set_clusterer, .match_type = .begin, },
         };
 
         for (mappings) |mapping| {

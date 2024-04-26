@@ -3,39 +3,87 @@ const Allocator = std.mem.Allocator;
 const Rng = std.rand.DefaultPrng;
 const Self = @This();
 
-const PointPair = struct {
-    a: usize,
-    b: usize,
-    distance: f32,
+const ClustererIf = struct {
+    vtable: struct {
+        next: *const fn (*ClustererIf, *Clusters) anyerror!void,
+        reset: *const fn (*ClustererIf, []const Point, *Clusters) anyerror!void,
+        free: *const fn (*ClustererIf) void,
+    },
 
-    fn fromPoints(points: []const Point, a: usize, b: usize) PointPair {
-        const ax: f32 = @floatFromInt(points[a].x);
-        const ay: f32 = @floatFromInt(points[a].y);
-        const bx: f32 = @floatFromInt(points[b].x);
-        const by: f32 = @floatFromInt(points[b].y);
-        const x_dist: f32 = ax - bx;
-        const y_dist: f32 = ay - by;
-        const distance: f32 = x_dist * x_dist + y_dist * y_dist;
-        return .{
-            .a = a,
-            .b = b,
-            .distance = distance,
-        };
+    fn next(self: *ClustererIf, clusters: *Clusters) !void {
+        return self.vtable.next(self, clusters);
     }
 
-    fn greaterThan(_: void, lhs: PointPair, rhs: PointPair) bool {
-        return lhs.distance > rhs.distance;
+    fn reset(self: *ClustererIf, points: []const Point, clusters: *Clusters) !void {
+        return self.vtable.reset(self, points, clusters);
+    }
+
+    fn deinit(self: *ClustererIf) void {
+        self.vtable.free(self);
     }
 };
 
 const AgglomerativeClusterer = struct {
+    alloc: Allocator,
     distances: std.ArrayList(PointPair),
+    clusterer_if: ClustererIf,
 
-    fn init(alloc: Allocator, points: []const Point, clusters: *Clusters) !AgglomerativeClusterer {
+    const PointPair = struct {
+        a: usize,
+        b: usize,
+        distance: f32,
+
+        fn fromPoints(points: []const Point, a: usize, b: usize) PointPair {
+            const ax: f32 = @floatFromInt(points[a].x);
+            const ay: f32 = @floatFromInt(points[a].y);
+            const bx: f32 = @floatFromInt(points[b].x);
+            const by: f32 = @floatFromInt(points[b].y);
+            const x_dist: f32 = ax - bx;
+            const y_dist: f32 = ay - by;
+            const distance: f32 = x_dist * x_dist + y_dist * y_dist;
+            return .{
+                .a = a,
+                .b = b,
+                .distance = distance,
+            };
+        }
+
+        fn greaterThan(_: void, lhs: PointPair, rhs: PointPair) bool {
+            return lhs.distance > rhs.distance;
+        }
+    };
+
+    fn init(alloc: Allocator, points: []const Point, clusters: *Clusters) !*ClustererIf {
         var distances = std.ArrayList(PointPair).init(alloc);
         errdefer distances.deinit();
 
-        try distances.ensureTotalCapacity(points.len * points.len);
+        var clusterer_if = try alloc.create(AgglomerativeClusterer);
+        errdefer alloc.destroy(clusterer_if);
+
+        clusterer_if.alloc = alloc;
+        clusterer_if.distances = distances;
+        clusterer_if.clusterer_if.vtable = .{
+            .next = AgglomerativeClusterer.next,
+            .reset = AgglomerativeClusterer.reset,
+            .free = AgglomerativeClusterer.free,
+        };
+
+        try clusterer_if.clusterer_if.reset(points, clusters);
+
+        return &clusterer_if.clusterer_if;
+    }
+
+    fn free(clusterer_if: *ClustererIf) void {
+        const self: *AgglomerativeClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+        self.distances.deinit();
+        self.alloc.destroy(self);
+    }
+
+    fn reset(clusterer_if: *ClustererIf, points: []const Point, clusters: *Clusters) anyerror!void {
+        const self: *AgglomerativeClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+
+        self.distances.clearAndFree();
+        try self.distances.ensureTotalCapacity(points.len * points.len);
 
         for (0..points.len) |i| {
             const cluster_id = try clusters.addCluster();
@@ -46,23 +94,17 @@ const AgglomerativeClusterer = struct {
                     continue;
                 }
 
-                try distances.append(PointPair.fromPoints(points, i, j));
+                try self.distances.append(PointPair.fromPoints(points, i, j));
             }
         }
 
-        std.sort.pdq(PointPair, distances.items, {}, PointPair.greaterThan);
-
-        return .{
-            .distances = distances,
-        };
-    }
-
-    fn deinit(self: *AgglomerativeClusterer) void {
-        self.distances.deinit();
+        std.sort.pdq(PointPair, self.distances.items, {}, PointPair.greaterThan);
     }
 
     /// Invalid to call if clusters has been modified outside of our clusterer.
-    fn next(self: *AgglomerativeClusterer, clusters: *Clusters) !void {
+    fn next(clusterer_if: *ClustererIf, clusters: *Clusters) anyerror!void {
+        const self: *AgglomerativeClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+
         while (true) {
             if (self.distances.items.len < 1) {
                 return;
@@ -79,6 +121,40 @@ const AgglomerativeClusterer = struct {
             try clusters.merge(a_cluster, b_cluster);
             break;
         }
+    }
+};
+
+const DummyClusterer = struct {
+    alloc: Allocator,
+    clusterer_if: ClustererIf,
+
+    fn init(alloc: Allocator, points: []const Point, clusters: *Clusters) !*ClustererIf {
+        var clusterer = try alloc.create(DummyClusterer);
+        errdefer alloc.destroy(clusterer);
+
+        clusterer.alloc = alloc;
+        clusterer.clusterer_if.vtable = .{
+            .next = DummyClusterer.next,
+            .reset = DummyClusterer.reset,
+            .free = DummyClusterer.free,
+        };
+
+        try clusterer.clusterer_if.reset(points, clusters);
+        return &clusterer.clusterer_if;
+    }
+
+    fn next(_: *ClustererIf, _: *Clusters) anyerror!void {}
+
+    fn reset(_: *ClustererIf, points: []const Point, clusters: *Clusters) anyerror!void {
+        const cluster_id = try clusters.addCluster();
+        for (0..points.len) |point_id| {
+            _ = try clusters.addToCluster(cluster_id, point_id);
+        }
+    }
+
+    fn free(clusterer_if: *ClustererIf) void {
+        const self: *DummyClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+        self.alloc.destroy(self);
     }
 };
 
@@ -288,11 +364,16 @@ pub const Clusters = struct {
     }
 };
 
+pub const ClustererId = enum {
+    dummy,
+    agglomerative,
+};
+
 alloc: Allocator,
 points: std.ArrayList(Point),
 clusters: Clusters,
 rng: Rng,
-clusterer: AgglomerativeClusterer,
+clusterer: *ClustererIf,
 
 pub fn init(alloc: Allocator) !Self {
     var points = std.ArrayList(Point).init(alloc);
@@ -332,12 +413,31 @@ pub fn rerollPoints(self: *Self, num_elems: usize, num_clusters: usize, cluster_
     self.clusters.deinit();
     self.clusters = try Clusters.init(self.alloc);
 
-    self.clusterer.deinit();
-    self.clusterer = try AgglomerativeClusterer.init(self.alloc, self.points.items, &self.clusters);
+    try self.clusterer.reset(self.points.items, &self.clusters);
 }
 
 pub fn next(self: *Self) !void {
     try self.clusterer.next(&self.clusters);
+}
+
+pub fn setClusterer(self: *Self, clusterer: ClustererId) !void {
+    var new_clusters = try Clusters.init(self.alloc);
+    errdefer new_clusters.deinit();
+
+    var new_clusterer: *ClustererIf = undefined;
+    switch (clusterer) {
+        .dummy => {
+            new_clusterer = try DummyClusterer.init(self.alloc, self.points.items, &new_clusters);
+        },
+        .agglomerative => {
+            new_clusterer = try AgglomerativeClusterer.init(self.alloc, self.points.items, &new_clusters);
+        },
+    }
+
+    self.clusterer.deinit();
+    self.clusters.deinit();
+    self.clusters = new_clusters;
+    self.clusterer = new_clusterer;
 }
 
 fn generatePoints(rng: *Rng, items: []Point, num_clusters: usize, cluster_radius: f32) !void {

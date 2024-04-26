@@ -72,7 +72,33 @@ async function reset() {
   await rerender();
 }
 
+async function setClusterer(value) {
+  await fetch("/set_clusterer?id=" + value);
+  await rerender();
+}
+
+async function populateClusterers() {
+  const clusterers_response = await fetch("/clusterers");
+  const clusterers = await clusterers_response.json();
+
+  /** @type HTMLSelectElement */
+  const clusterers_select = document.getElementById("clusterer");
+  for (let clusterer of clusterers) {
+    const option = document.createElement("option");
+    option.text = clusterer.name;
+    option.value = clusterer.id;
+    clusterers_select.add(option);
+  }
+  clusterers_select.addEventListener("change", async function (ev) {
+    setClusterer(ev.target.value);
+  });
+
+  setClusterer(clusterers_select.value);
+}
+
 window.onload = async function () {
+  populateClusterers();
+
   const next_button = document.getElementById("next");
   next_button.onclick = next;
   const reset_button = document.getElementById("reset");
