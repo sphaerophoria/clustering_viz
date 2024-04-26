@@ -317,9 +317,9 @@ fn writePointsJson(json_writer: anytype, points: []const Point) !void {
 fn writeClustersJson(json_writer: anytype, clusters: *const Clusters) !void {
     try json_writer.beginArray();
     var it = clusters.clusterIt();
-    while (it.next()) |cluster| {
+    while (it.next()) |item| {
         try json_writer.beginArray();
-        for (cluster) |point| {
+        for (item.cluster) |point| {
             try json_writer.write(point);
         }
         try json_writer.endArray();

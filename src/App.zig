@@ -190,9 +190,9 @@ fn clustersMatch(clusters: *Clusters, comptime expected: []const []const usize) 
     var found = [_]bool{false} ** expected.len;
 
     var cluster_it = clusters.clusterIt();
-    while (cluster_it.next()) |cluster| {
+    while (cluster_it.next()) |item| {
         for (expected, 0..) |expected_cluster, expected_idx| {
-            if (clusterMatches(cluster, expected_cluster)) {
+            if (clusterMatches(item.cluster, expected_cluster)) {
                 found[expected_idx] = true;
             }
         }
@@ -228,8 +228,8 @@ test "Agglomerative Clusterer" {
     // White box test assuming that the clusters will be in order
     var clusterIt = clusters.clusterIt();
     var i: usize = 0;
-    while (clusterIt.next()) |cluster| {
-        try std.testing.expectEqualSlices(usize, &[_]usize{i}, cluster);
+    while (clusterIt.next()) |item| {
+        try std.testing.expectEqualSlices(usize, &[_]usize{i}, item.cluster);
         i += 1;
     }
 
@@ -270,13 +270,21 @@ pub const ClusterIt = struct {
     clusters: []const std.ArrayListUnmanaged(usize),
     i: usize,
 
-    pub fn next(self: *ClusterIt) ?[]const usize {
+    const Output = struct {
+        cluster_id: usize,
+        cluster: []const usize,
+    };
+
+    pub fn next(self: *ClusterIt) ?Output {
         if (self.i >= self.clusters.len) {
             return null;
         }
 
         defer self.i += 1;
-        return self.clusters[self.i].items;
+        return .{
+            .cluster_id = self.i,
+            .cluster = self.clusters[self.i].items,
+        };
     }
 };
 
