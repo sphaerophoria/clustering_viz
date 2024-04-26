@@ -5,13 +5,13 @@ const Self = @This();
 
 const ClustererIf = struct {
     vtable: struct {
-        next: *const fn (*ClustererIf, *Clusters) anyerror!void,
+        next: *const fn (*ClustererIf, []const Point, *Clusters) anyerror!void,
         reset: *const fn (*ClustererIf, []const Point, *Clusters) anyerror!void,
         free: *const fn (*ClustererIf) void,
     },
 
-    fn next(self: *ClustererIf, clusters: *Clusters) !void {
-        return self.vtable.next(self, clusters);
+    fn next(self: *ClustererIf, points: []const Point, clusters: *Clusters) !void {
+        return self.vtable.next(self, points, clusters);
     }
 
     fn reset(self: *ClustererIf, points: []const Point, clusters: *Clusters) !void {
@@ -102,7 +102,7 @@ const AgglomerativeClusterer = struct {
     }
 
     /// Invalid to call if clusters has been modified outside of our clusterer.
-    fn next(clusterer_if: *ClustererIf, clusters: *Clusters) anyerror!void {
+    fn next(clusterer_if: *ClustererIf, _: []const Point, clusters: *Clusters) anyerror!void {
         const self: *AgglomerativeClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
 
         while (true) {
@@ -124,26 +124,136 @@ const AgglomerativeClusterer = struct {
     }
 };
 
-const DummyClusterer = struct {
+const DianaClusterer = struct {
     alloc: Allocator,
     clusterer_if: ClustererIf,
 
     fn init(alloc: Allocator, points: []const Point, clusters: *Clusters) !*ClustererIf {
-        var clusterer = try alloc.create(DummyClusterer);
+        var clusterer = try alloc.create(DianaClusterer);
         errdefer alloc.destroy(clusterer);
 
         clusterer.alloc = alloc;
         clusterer.clusterer_if.vtable = .{
-            .next = DummyClusterer.next,
-            .reset = DummyClusterer.reset,
-            .free = DummyClusterer.free,
+            .next = DianaClusterer.next,
+            .reset = DianaClusterer.reset,
+            .free = DianaClusterer.free,
         };
 
         try clusterer.clusterer_if.reset(points, clusters);
         return &clusterer.clusterer_if;
     }
 
-    fn next(_: *ClustererIf, _: *Clusters) anyerror!void {}
+    fn maxDistanceBetweenPoints(point_ids: []const usize, points: []const Point) f32 {
+        var max: f32 = 0;
+        for (point_ids) |a| {
+            for (point_ids) |b| {
+                if (a == b) {
+                    continue;
+                }
+
+                max = @max(max, Point.distance_2(&points[a], &points[b]));
+            }
+        }
+
+        return max;
+    }
+
+    fn averageDistanceBetweenPoints(point_id: usize, point_ids: []const usize, points: []const Point) f32 {
+        var sum_total: f32 = 0;
+        var offset: usize = 0;
+        for (point_ids) |other_point_id| {
+            if (point_id == other_point_id) {
+                offset += 1;
+                continue;
+            }
+
+            sum_total += Point.distance_2(&points[point_id], &points[other_point_id]);
+        }
+
+        return sum_total / @as(f32, @floatFromInt((point_ids.len - offset)));
+    }
+
+    /// Find the cluster that has the largest distance between two points
+    /// Returns the index of the largest cluster
+    fn findBiggestCluster(points: []const Point, clusters: *const Clusters) usize {
+        var cluster_it = clusters.clusterIt();
+
+        var max_cluster_id: usize = 0;
+        const first_cluster = cluster_it.next() orelse {
+            std.debug.panic("Clusters not initialized for DianaClusterer", .{});
+        };
+        var max_cluster_distance = maxDistanceBetweenPoints(first_cluster.cluster, points);
+
+        while (cluster_it.next()) |item| {
+            const cluster_distance = maxDistanceBetweenPoints(item.cluster, points);
+            if (cluster_distance > max_cluster_distance) {
+                max_cluster_id = item.cluster_id;
+                max_cluster_distance = cluster_distance;
+            }
+        }
+
+        return max_cluster_id;
+    }
+
+    fn findMostDissimilarPointInCluster(cluster: []const usize, points: []const Point) usize {
+        var ret: usize = std.math.maxInt(usize);
+        var ret_avg_dist: f32 = 0.0;
+        for (cluster) |point_id| {
+            const avg_dist = averageDistanceBetweenPoints(point_id, cluster, points);
+
+            if (avg_dist > ret_avg_dist) {
+                ret_avg_dist = avg_dist;
+                ret = point_id;
+            }
+        }
+
+        return ret;
+    }
+
+    fn findPointToMove(from: []const usize, to: []const usize, points: []const Point) ?usize {
+        var best_candidate: usize = 0;
+        var best_candidate_score: f32 = -std.math.floatMax(f32);
+
+        for (from) |point_id| {
+            const score =
+                averageDistanceBetweenPoints(point_id, from, points) -
+                averageDistanceBetweenPoints(point_id, to, points);
+
+            if (score > best_candidate_score) {
+                best_candidate = point_id;
+                best_candidate_score = score;
+            }
+        }
+
+        if (best_candidate_score < 0) {
+            return null;
+        }
+
+        return best_candidate;
+    }
+
+    fn next(_: *ClustererIf, points: []const Point, clusters: *Clusters) anyerror!void {
+        const biggest_cluster_id = findBiggestCluster(points, clusters);
+        const most_dissimilar_point = findMostDissimilarPointInCluster(clusters.getCluster(biggest_cluster_id), points);
+
+        const new_cluster_id = try clusters.addCluster();
+
+        clusters.removeFromCluster(biggest_cluster_id, most_dissimilar_point);
+        try clusters.addToCluster(new_cluster_id, most_dissimilar_point);
+
+        while (true) {
+            const next_evicted_point = findPointToMove(
+                clusters.getCluster(biggest_cluster_id),
+                clusters.getCluster(new_cluster_id),
+                points,
+            ) orelse {
+                break;
+            };
+
+            clusters.removeFromCluster(biggest_cluster_id, next_evicted_point);
+            try clusters.addToCluster(new_cluster_id, next_evicted_point);
+        }
+    }
 
     fn reset(_: *ClustererIf, points: []const Point, clusters: *Clusters) anyerror!void {
         const cluster_id = try clusters.addCluster();
@@ -153,7 +263,7 @@ const DummyClusterer = struct {
     }
 
     fn free(clusterer_if: *ClustererIf) void {
-        const self: *DummyClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+        const self: *DianaClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
         self.alloc.destroy(self);
     }
 };
@@ -233,7 +343,7 @@ test "Agglomerative Clusterer" {
         i += 1;
     }
 
-    try clusterer.next(&clusters);
+    try clusterer.next(&points, &clusters);
     try std.testing.expect(clustersMatch(&clusters, &[_][]const usize{
         &[_]usize{0},
         &[_]usize{ 1, 2 },
@@ -242,7 +352,7 @@ test "Agglomerative Clusterer" {
         &[_]usize{4},
     }));
 
-    try clusterer.next(&clusters);
+    try clusterer.next(&points, &clusters);
     try std.testing.expect(clustersMatch(&clusters, &[_][]const usize{
         &[_]usize{ 0, 4 },
         &[_]usize{ 1, 2 },
@@ -251,7 +361,7 @@ test "Agglomerative Clusterer" {
         &[_]usize{},
     }));
 
-    try clusterer.next(&clusters);
+    try clusterer.next(&points, &clusters);
     try std.testing.expect(clustersMatch(&clusters, &[_][]const usize{
         &[_]usize{},
         &[_]usize{ 1, 2, 0, 4 },
@@ -264,6 +374,16 @@ test "Agglomerative Clusterer" {
 pub const Point = struct {
     x: i32,
     y: i32,
+
+    fn distance_2(a: *const Point, b: *const Point) f32 {
+        const ax: f32 = @floatFromInt(a.x);
+        const ay: f32 = @floatFromInt(a.y);
+        const bx: f32 = @floatFromInt(b.x);
+        const by: f32 = @floatFromInt(b.y);
+        const x_dist: f32 = ax - bx;
+        const y_dist: f32 = ay - by;
+        return x_dist * x_dist + y_dist * y_dist;
+    }
 };
 
 pub const ClusterIt = struct {
@@ -331,6 +451,15 @@ pub const Clusters = struct {
         try cluster.append(self.arena.allocator(), point_id);
     }
 
+    pub fn removeFromCluster(self: *Clusters, cluster_id: usize, point_id: usize) void {
+        const cluster: *std.ArrayListUnmanaged(usize) = &self.clusters.items[cluster_id];
+        const point_id_idx = std.mem.indexOfScalar(usize, cluster.items, point_id) orelse {
+            std.debug.panic("point id was not in cluster", .{});
+        };
+
+        _ = cluster.swapRemove(point_id_idx);
+    }
+
     pub fn clusterContainingPoint(self: *Clusters, point_id: usize) ?usize {
         for (self.clusters.items, 0..) |cluster, cluster_id| {
             for (cluster.items) |cluster_point| {
@@ -373,8 +502,8 @@ pub const Clusters = struct {
 };
 
 pub const ClustererId = enum {
-    dummy,
     agglomerative,
+    diana,
 };
 
 alloc: Allocator,
@@ -425,7 +554,7 @@ pub fn rerollPoints(self: *Self, num_elems: usize, num_clusters: usize, cluster_
 }
 
 pub fn next(self: *Self) !void {
-    try self.clusterer.next(&self.clusters);
+    try self.clusterer.next(self.points.items, &self.clusters);
 }
 
 pub fn setClusterer(self: *Self, clusterer: ClustererId) !void {
@@ -434,11 +563,11 @@ pub fn setClusterer(self: *Self, clusterer: ClustererId) !void {
 
     var new_clusterer: *ClustererIf = undefined;
     switch (clusterer) {
-        .dummy => {
-            new_clusterer = try DummyClusterer.init(self.alloc, self.points.items, &new_clusters);
-        },
         .agglomerative => {
             new_clusterer = try AgglomerativeClusterer.init(self.alloc, self.points.items, &new_clusters);
+        },
+        .diana => {
+            new_clusterer = try DianaClusterer.init(self.alloc, self.points.items, &new_clusters);
         },
     }
 
