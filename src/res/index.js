@@ -97,8 +97,10 @@ async function reset() {
   await rerender();
 }
 
-async function setClusterer(value) {
-  await fetch("/set_clusterer?id=" + value);
+async function setClusterer() {
+  const clusterer = document.getElementById("clusterer").value;
+  const num_means = document.getElementById("num_means").value;
+  await fetch("/set_clusterer?id=" + clusterer + "&num_means=" + num_means);
   await rerender();
 }
 
@@ -114,11 +116,10 @@ async function populateClusterers() {
     option.value = clusterer.id;
     clusterers_select.add(option);
   }
-  clusterers_select.addEventListener("change", async function (ev) {
-    setClusterer(ev.target.value);
-  });
+  clusterers_select.onchange = setClusterer;
+  document.getElementById("num_means").onchange = setClusterer;
 
-  setClusterer(clusterers_select.value);
+  setClusterer();
 }
 
 window.onload = async function () {

@@ -34,7 +34,7 @@ pub const DebugInfo = struct {
     }
 };
 
-const ClustererIf = struct {
+pub const ClustererIf = struct {
     vtable: struct {
         next: *const fn (*ClustererIf, []const Point, *Clusters) anyerror!void,
         reset: *const fn (*ClustererIf, []const Point, *Clusters) anyerror!void,
@@ -63,7 +63,7 @@ const ClustererIf = struct {
     }
 };
 
-const AgglomerativeClusterer = struct {
+pub const AgglomerativeClusterer = struct {
     alloc: Allocator,
     distances: std.ArrayList(PointPair),
     clusterer_if: ClustererIf,
@@ -93,7 +93,7 @@ const AgglomerativeClusterer = struct {
         }
     };
 
-    fn init(alloc: Allocator, points: []const Point, clusters: *Clusters) !*ClustererIf {
+    pub fn init(alloc: Allocator) !*ClustererIf {
         var distances = std.ArrayList(PointPair).init(alloc);
         errdefer distances.deinit();
 
@@ -107,8 +107,6 @@ const AgglomerativeClusterer = struct {
             .reset = AgglomerativeClusterer.reset,
             .free = AgglomerativeClusterer.free,
         };
-
-        try clusterer_if.clusterer_if.reset(points, clusters);
 
         return &clusterer_if.clusterer_if;
     }
@@ -164,11 +162,11 @@ const AgglomerativeClusterer = struct {
     }
 };
 
-const DianaClusterer = struct {
+pub const DianaClusterer = struct {
     alloc: Allocator,
     clusterer_if: ClustererIf,
 
-    fn init(alloc: Allocator, points: []const Point, clusters: *Clusters) !*ClustererIf {
+    pub fn init(alloc: Allocator) !*ClustererIf {
         var clusterer = try alloc.create(DianaClusterer);
         errdefer alloc.destroy(clusterer);
 
@@ -179,7 +177,6 @@ const DianaClusterer = struct {
             .free = DianaClusterer.free,
         };
 
-        try clusterer.clusterer_if.reset(points, clusters);
         return &clusterer.clusterer_if;
     }
 
@@ -308,7 +305,7 @@ const DianaClusterer = struct {
     }
 };
 
-const KMeansClusterer = struct {
+pub const KMeansClusterer = struct {
     alloc: Allocator,
     means: std.ArrayList(Point),
     clusterer_if: ClustererIf,
@@ -318,7 +315,7 @@ const KMeansClusterer = struct {
     max_x: i32,
     max_y: i32,
 
-    fn init(alloc: Allocator, points: []const Point, clusters: *Clusters, num_clusters: usize) !*ClustererIf {
+    pub fn init(alloc: Allocator, num_clusters: usize) !*ClustererIf {
         var clusterer = try alloc.create(KMeansClusterer);
         errdefer alloc.destroy(clusterer);
 
@@ -339,7 +336,6 @@ const KMeansClusterer = struct {
             .free = KMeansClusterer.free,
         };
 
-        try clusterer.clusterer_if.reset(points, clusters);
         return &clusterer.clusterer_if;
     }
 
@@ -538,8 +534,10 @@ test "Agglomerative Clusterer" {
     var clusters = try Clusters.init(std.testing.allocator);
     defer clusters.deinit();
 
-    var clusterer = try AgglomerativeClusterer.init(std.testing.allocator, &points, &clusters);
+    var clusterer = try AgglomerativeClusterer.init(std.testing.allocator);
     defer clusterer.deinit();
+
+    try clusterer.reset(&points, &clusters);
 
     // On init we should have one cluster for each point
     try std.testing.expectEqual(clusters.clusters.items.len, points.len);
@@ -740,7 +738,8 @@ pub fn init(alloc: Allocator) !Self {
     try generatePoints(&rng, points.items, 5, 5);
 
     var clusters = try Clusters.init(alloc);
-    const clusterer = try AgglomerativeClusterer.init(alloc, points.items, &clusters);
+    const clusterer = try AgglomerativeClusterer.init(alloc);
+    try clusterer.reset(points.items, &clusters);
 
     return .{
         .alloc = alloc,
@@ -772,22 +771,11 @@ pub fn next(self: *Self) !void {
     try self.clusterer.next(self.points.items, &self.clusters);
 }
 
-pub fn setClusterer(self: *Self, clusterer: ClustererId) !void {
+pub fn setClusterer(self: *Self, new_clusterer: *ClustererIf) !void {
     var new_clusters = try Clusters.init(self.alloc);
     errdefer new_clusters.deinit();
 
-    var new_clusterer: *ClustererIf = undefined;
-    switch (clusterer) {
-        .agglomerative => {
-            new_clusterer = try AgglomerativeClusterer.init(self.alloc, self.points.items, &new_clusters);
-        },
-        .diana => {
-            new_clusterer = try DianaClusterer.init(self.alloc, self.points.items, &new_clusters);
-        },
-        .k_means => {
-            new_clusterer = try KMeansClusterer.init(self.alloc, self.points.items, &new_clusters, 3);
-        },
-    }
+    try new_clusterer.reset(self.points.items, &new_clusters);
 
     self.clusterer.deinit();
     self.clusters.deinit();

@@ -237,20 +237,43 @@ fn handleHttpRequest(self: *Self, request: *std.http.Server.Request) !void {
         },
         .set_clusterer => {
             var it = QueryParamIt.init(request.head.target);
-            var id: ?App.ClustererId = null;
+            var id_opt: ?App.ClustererId = null;
             while (it.next()) |query_param| {
                 if (std.mem.eql(u8, "id", query_param.key)) {
-                    id = @enumFromInt(try std.fmt.parseInt(u8, query_param.val, 10));
+                    id_opt = try std.meta.intToEnum(App.ClustererId, try std.fmt.parseInt(u8, query_param.val, 10));
+                    break;
                 }
 
             }
 
-            const id_final = id orelse {
+            const id = id_opt orelse {
                 std.log.err("set clusterer called with no id parameter", .{});
-                return error.NoId;
+                return error.InvalidData;
             };
 
-            try self.app.setClusterer(id_final);
+
+            var new_clusterer: *App.ClustererIf = undefined;
+            switch (id) {
+                .agglomerative => {
+                    new_clusterer = try App.AgglomerativeClusterer.init(self.app.alloc);
+                },
+                .diana => {
+                    new_clusterer = try App.DianaClusterer.init(self.app.alloc);
+                },
+                .k_means => {
+                    it = QueryParamIt.init(request.head.target);
+                    var num_means: usize = 3;
+                    while (it.next()) |query_param| {
+                        if (std.mem.eql(u8, "num_means", query_param.key)) {
+                            num_means = try std.fmt.parseInt(u8, query_param.val, 10);
+                            break;
+                        }
+
+                    }
+                    new_clusterer = try App.KMeansClusterer.init(self.app.alloc, num_means);
+                },
+            }
+            try self.app.setClusterer(new_clusterer);
             try request.respond("", .{
                 .keep_alive = false,
             });
