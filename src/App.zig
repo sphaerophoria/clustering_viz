@@ -3,10 +3,42 @@ const Allocator = std.mem.Allocator;
 const Rng = std.rand.DefaultPrng;
 const Self = @This();
 
+pub const DebugInfoPair = struct {
+    key: []const u8,
+    val: DebugInfoElem,
+};
+
+pub const DebugInfoElem = union(enum) {
+    integer: i64,
+    real: f32,
+    string: []const u8,
+    named_vals: []const DebugInfoPair,
+    array: []const DebugInfoElem,
+};
+
+pub const DebugInfo = struct {
+    arena: ?std.heap.ArenaAllocator,
+    root: DebugInfoElem,
+
+    fn empty() DebugInfo {
+        return .{
+            .arena = null,
+            .root = .{ .named_vals = &[_]DebugInfoPair{} },
+        };
+    }
+
+    pub fn deinit(self: *DebugInfo) void {
+        if (self.arena) |*arena| {
+            arena.deinit();
+        }
+    }
+};
+
 const ClustererIf = struct {
     vtable: struct {
         next: *const fn (*ClustererIf, []const Point, *Clusters) anyerror!void,
         reset: *const fn (*ClustererIf, []const Point, *Clusters) anyerror!void,
+        getDebugData: ?*const fn (*ClustererIf) anyerror!DebugInfo = null,
         free: *const fn (*ClustererIf) void,
     },
 
@@ -16,6 +48,14 @@ const ClustererIf = struct {
 
     fn reset(self: *ClustererIf, points: []const Point, clusters: *Clusters) !void {
         return self.vtable.reset(self, points, clusters);
+    }
+
+    fn getDebugData(self: *ClustererIf) !DebugInfo {
+        if (self.vtable.getDebugData) |f| {
+            return f(self);
+        } else {
+            return DebugInfo.empty();
+        }
     }
 
     fn deinit(self: *ClustererIf) void {
@@ -268,6 +308,175 @@ const DianaClusterer = struct {
     }
 };
 
+const KMeansClusterer = struct {
+    alloc: Allocator,
+    means: std.ArrayList(Point),
+    clusterer_if: ClustererIf,
+    rng: Rng,
+    min_x: i32,
+    min_y: i32,
+    max_x: i32,
+    max_y: i32,
+
+    fn init(alloc: Allocator, points: []const Point, clusters: *Clusters, num_clusters: usize) !*ClustererIf {
+        var clusterer = try alloc.create(KMeansClusterer);
+        errdefer alloc.destroy(clusterer);
+
+        var seed: u64 = undefined;
+        try std.posix.getrandom(std.mem.asBytes(&seed));
+        const rng = Rng.init(seed);
+
+        var means = std.ArrayList(Point).init(alloc);
+        try means.resize(num_clusters);
+
+        clusterer.alloc = alloc;
+        clusterer.means = means;
+        clusterer.rng = rng;
+        clusterer.clusterer_if.vtable = .{
+            .next = KMeansClusterer.next,
+            .reset = KMeansClusterer.reset,
+            .getDebugData = KMeansClusterer.getDebugData,
+            .free = KMeansClusterer.free,
+        };
+
+        try clusterer.clusterer_if.reset(points, clusters);
+        return &clusterer.clusterer_if;
+    }
+
+    fn assignClusters(alloc: Allocator, means: []const Point, points: []const Point, clusters: *Clusters) !void {
+
+        // Other clustering algorithms update the clusters every step. K means
+        // re-calculates every cluster based off the current means
+        clusters.clear();
+        for (0..means.len) |_| {
+            _ = try clusters.addCluster();
+        }
+
+        // Scratch space to figure out which cluster is best for each point
+        // Dynamically allocated because we need one per mean (runtime value)
+        // Allocated once to avoid allocating in the loop
+        var distance_to_means = try alloc.alloc(f32, means.len);
+        defer alloc.free(distance_to_means);
+
+        for (points, 0..) |*point, point_id| {
+            for (means, 0..) |mean, idx| {
+                distance_to_means[idx] = mean.distance_2(point);
+            }
+
+            const best_cluster = std.mem.indexOfMin(f32, distance_to_means);
+            try clusters.addToCluster(best_cluster, point_id);
+        }
+    }
+
+    fn updateMeans(self: *KMeansClusterer, points: []const Point, clusters: *const Clusters) !void {
+        var cluster_it = clusters.clusterIt();
+        while (cluster_it.next()) |cluster_item| {
+            // If the cluster has no elements, other clusters beat it for every
+            // single point. Randomize the mean to try to split up another
+            // cluster
+            if (cluster_item.cluster.len == 0) {
+                self.means.items[cluster_item.cluster_id].x = self.rng.random().intRangeAtMost(i32, self.min_x, self.max_x);
+                self.means.items[cluster_item.cluster_id].y = self.rng.random().intRangeAtMost(i32, self.min_y, self.max_y);
+                continue;
+            }
+
+            var avg_x: f32 = 0;
+            var avg_y: f32 = 0;
+            for (cluster_item.cluster) |point_id| {
+                avg_x += @floatFromInt(points[point_id].x);
+                avg_y += @floatFromInt(points[point_id].y);
+            }
+
+            avg_x /= @floatFromInt(cluster_item.cluster.len);
+            avg_y /= @floatFromInt(cluster_item.cluster.len);
+
+            self.means.items[cluster_item.cluster_id] = .{
+                .x = @intFromFloat(@round(avg_x)),
+                .y = @intFromFloat(@round(avg_y)),
+            };
+        }
+    }
+
+    fn next(clusterer_if: *ClustererIf, points: []const Point, clusters: *Clusters) anyerror!void {
+        const self: *KMeansClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+
+        try assignClusters(self.alloc, self.means.items, points, clusters);
+        try self.updateMeans(points, clusters);
+    }
+
+    fn reset(clusterer_if: *ClustererIf, points: []const Point, clusters: *Clusters) anyerror!void {
+        const self: *KMeansClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+
+        self.min_x = std.math.maxInt(i32);
+        self.min_y = std.math.maxInt(i32);
+        self.max_x = std.math.minInt(i32);
+        self.max_y = std.math.minInt(i32);
+
+        for (points) |point| {
+            self.min_x = @min(self.min_x, point.x);
+            self.min_y = @min(self.min_y, point.y);
+            self.max_x = @max(self.max_x, point.x);
+            self.max_y = @max(self.max_y, point.y);
+        }
+
+        for (self.means.items) |*mean| {
+            mean.x = self.rng.random().intRangeAtMost(i32, self.min_x, self.max_x);
+            mean.y = self.rng.random().intRangeAtMost(i32, self.min_y, self.max_y);
+        }
+
+        try clusterer_if.next(points, clusters);
+    }
+
+    fn getDebugData(clusterer_if: *ClustererIf) anyerror!DebugInfo {
+        const self: *KMeansClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        errdefer arena.deinit();
+
+        const alloc = arena.allocator();
+
+        const debug_means = try alloc.alloc(DebugInfoElem, self.means.items.len);
+
+        for (self.means.items, debug_means) |input, *output| {
+            var elems = try alloc.alloc(DebugInfoPair, 2);
+            elems[0].key = "x";
+            elems[0].val = .{
+                .integer = input.x,
+            };
+
+            elems[1].key = "y";
+            elems[1].val = .{
+                .integer = input.y,
+            };
+
+            output.* = .{
+                .named_vals = elems,
+            };
+        }
+
+        var root = try alloc.alloc(DebugInfoPair, 2);
+        root[0].key = "type";
+        root[0].val = .{
+            .string = "k_means",
+        };
+
+        root[1].key = "means";
+        root[1].val = .{
+            .array = debug_means,
+        };
+
+        return .{ .arena = arena, .root = .{
+            .named_vals = root,
+        } };
+    }
+
+    fn free(clusterer_if: *ClustererIf) void {
+        const self: *KMeansClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+        self.means.deinit();
+        self.alloc.destroy(self);
+    }
+};
+
 fn clusterMatches(cluster: []const usize, expected: []const usize) bool {
     if (cluster.len != expected.len) {
         return false;
@@ -496,6 +705,11 @@ pub const Clusters = struct {
         b.clearAndFree(alloc);
     }
 
+    pub fn clear(self: *Clusters) void {
+        self.clusters = std.ArrayListUnmanaged(std.ArrayListUnmanaged(usize)){};
+        _ = self.arena.reset(.retain_capacity);
+    }
+
     pub fn deinit(self: *Clusters) void {
         self.arena.deinit();
     }
@@ -504,6 +718,7 @@ pub const Clusters = struct {
 pub const ClustererId = enum {
     agglomerative,
     diana,
+    k_means,
 };
 
 alloc: Allocator,
@@ -569,6 +784,9 @@ pub fn setClusterer(self: *Self, clusterer: ClustererId) !void {
         .diana => {
             new_clusterer = try DianaClusterer.init(self.alloc, self.points.items, &new_clusters);
         },
+        .k_means => {
+            new_clusterer = try KMeansClusterer.init(self.alloc, self.points.items, &new_clusters, 3);
+        },
     }
 
     self.clusterer.deinit();
@@ -577,16 +795,26 @@ pub fn setClusterer(self: *Self, clusterer: ClustererId) !void {
     self.clusterer = new_clusterer;
 }
 
+pub fn getDebugData(self: *Self) !DebugInfo {
+    return self.clusterer.getDebugData();
+}
+
 fn generatePoints(rng: *Rng, items: []Point, num_clusters: usize, cluster_radius: f32) !void {
     const rng_if = rng.random();
+
+    if (cluster_radius > 50) {
+        std.log.err("cluster radius must be less than 50", .{});
+        return error.InvalidData;
+    }
 
     const remainder = items.len % num_clusters;
     const num_elems_per_bucket = items.len / num_clusters;
     var item_id: usize = 0;
 
     for (0..num_clusters) |bucket_id| {
-        const bucket_center_x: f32 = @floatFromInt(rng_if.intRangeAtMost(i32, 25, 75));
-        const bucket_center_y: f32 = @floatFromInt(rng_if.intRangeAtMost(i32, 25, 75));
+        const cluster_radius_i32: i32 = @intFromFloat(cluster_radius);
+        const bucket_center_x: f32 = @floatFromInt(rng_if.intRangeAtMost(i32, cluster_radius_i32, 100 - cluster_radius_i32));
+        const bucket_center_y: f32 = @floatFromInt(rng_if.intRangeAtMost(i32, cluster_radius_i32, 100 - cluster_radius_i32));
         var bucket_elems = num_elems_per_bucket;
         if (bucket_id < remainder) {
             bucket_elems += 1;

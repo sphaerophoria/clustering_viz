@@ -328,7 +328,32 @@ fn writeClustersJson(json_writer: anytype, clusters: *const Clusters) !void {
     try json_writer.endArray();
 }
 
-fn writeDataJson(writer: anytype, points: []const Point, clusters: *const Clusters) !void {
+fn serializeDebugInfo(writer: anytype, info: App.DebugInfoElem) !void {
+    switch (info) {
+        .integer => |v| try writer.write(v),
+        .real => |v| try writer.write(v),
+        .string => |v| try writer.write(v),
+        .named_vals => |items| {
+            try writer.beginObject();
+            for (items) |v| {
+                try writer.objectField(v.key);
+                try serializeDebugInfo(writer, v.val);
+            }
+            try writer.endObject();
+        },
+        .array => |arr| {
+            try writer.beginArray();
+            for (arr) |v| {
+                try serializeDebugInfo(writer, v);
+            }
+            try writer.endArray();
+        },
+
+    }
+
+}
+
+fn writeDataJson(writer: anytype, points: []const Point, clusters: *const Clusters, debug_info: *const App.DebugInfo,) !void {
     var json_writer = std.json.writeStream(writer, .{});
     try json_writer.beginObject();
 
@@ -337,6 +362,9 @@ fn writeDataJson(writer: anytype, points: []const Point, clusters: *const Cluste
 
     try json_writer.objectField("clusters");
     try writeClustersJson(&json_writer, clusters);
+
+    try json_writer.objectField("debug");
+    try serializeDebugInfo(&json_writer, debug_info.root);
 
     try json_writer.endObject();
 }
@@ -360,10 +388,17 @@ test "write json data" {
 
     var serialized = std.ArrayList(u8).init(std.testing.allocator);
     defer serialized.deinit();
-    try writeDataJson(serialized.writer(), &points, &clusters);
+
+    const debug_info = App.DebugInfo {
+        .arena = null,
+        .root = .{
+            .string = "test",
+        }
+    };
+    try writeDataJson(serialized.writer(), &points, &clusters, &debug_info);
 
     try std.testing.expectEqualStrings(
-        \\{"points":[{"x":1,"y":1},{"x":2,"y":3},{"x":4,"y":5}],"clusters":[[1],[0,2]]}
+        \\{"points":[{"x":1,"y":1},{"x":2,"y":3},{"x":4,"y":5}],"clusters":[[1],[0,2]],"debug":"test"}
         , serialized.items);
 }
 
@@ -379,7 +414,9 @@ fn sendData(request: *std.http.Server.Request, app: *App) !void {
         .extra_headers = http_headers,
     } });
 
-    try writeDataJson(response.writer(), app.points.items, &app.clusters);
+    var debug_info = try app.getDebugData();
+    defer debug_info.deinit();
+    try writeDataJson(response.writer(), app.points.items, &app.clusters, &debug_info);
     try response.end();
 }
 

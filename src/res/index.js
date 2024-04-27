@@ -47,6 +47,31 @@ async function rerender() {
       ctx.fill();
     }
   }
+
+  if (data.debug.type == "k_means") {
+    for (let mean_idx in data.debug.means) {
+      const mean = data.debug.means[mean_idx];
+      const color = cluster_colors[mean_idx];
+      ctx.lineWidth = 10;
+      ctx.strokeStyle = "black";
+      ctx.fillStyle = color;
+      const rect_size = 20;
+      ctx.fillRect(
+        mean.x * canvas_scale + canvas_offset - rect_size / 2,
+        mean.y * canvas_scale + canvas_offset - rect_size / 2,
+        rect_size,
+        rect_size,
+      );
+      ctx.beginPath();
+      ctx.rect(
+        mean.x * canvas_scale + canvas_offset - rect_size / 2,
+        mean.y * canvas_scale + canvas_offset - rect_size / 2,
+        rect_size,
+        rect_size,
+      );
+      ctx.stroke();
+    }
+  }
 }
 
 async function next() {
