@@ -117,7 +117,6 @@ const QueryParamIt = struct {
             .val = val,
         };
     }
-
 };
 
 fn handleReset(request: *std.http.Server.Request, app: *App) !void {
@@ -271,6 +270,20 @@ fn handleHttpRequest(self: *Self, request: *std.http.Server.Request) !void {
 
                     }
                     new_clusterer = try App.KMeansClusterer.init(self.app.alloc, num_means);
+                },
+                .dbscan => {
+                    it = QueryParamIt.init(request.head.target);
+                    var eps: f32 = 2.0;
+                    var min_pts: usize = 3;
+                    while (it.next()) |query_param| {
+                        if (std.mem.eql(u8, "eps", query_param.key)) {
+                            eps = try std.fmt.parseFloat(f32, query_param.val);
+                        } else if (std.mem.eql(u8, "min_pts", query_param.key)) {
+                            min_pts = try std.fmt.parseInt(usize, query_param.val, 10);
+                        }
+
+                    }
+                    new_clusterer = try App.DbscanClusterer.init(self.app.alloc, eps, min_pts);
                 },
             }
             try self.app.setClusterer(new_clusterer);

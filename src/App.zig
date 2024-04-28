@@ -473,6 +473,171 @@ pub const KMeansClusterer = struct {
     }
 };
 
+pub const DbscanClusterer = struct {
+    alloc: Allocator,
+    clusterer_if: ClustererIf,
+    eps: f32,
+    min_pts: usize,
+    point_id: usize,
+    noise_points: std.ArrayList(usize),
+
+    pub fn init(alloc: Allocator, eps: f32, min_pts: usize) !*ClustererIf {
+        var clusterer_if = try alloc.create(DbscanClusterer);
+        errdefer alloc.destroy(clusterer_if);
+
+        var noise_points = std.ArrayList(usize).init(alloc);
+        errdefer noise_points.deinit();
+
+        clusterer_if.alloc = alloc;
+        clusterer_if.eps = eps;
+        clusterer_if.min_pts = min_pts;
+        clusterer_if.point_id = 0;
+        clusterer_if.noise_points = noise_points;
+        clusterer_if.clusterer_if.vtable = .{
+            .next = DbscanClusterer.next,
+            .reset = DbscanClusterer.reset,
+            .free = DbscanClusterer.free,
+        };
+
+        return &clusterer_if.clusterer_if;
+    }
+
+    fn free(clusterer_if: *ClustererIf) void {
+        const self: *DbscanClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+        self.noise_points.deinit();
+        self.alloc.destroy(self);
+    }
+
+    fn reset(clusterer_if: *ClustererIf, _: []const Point, clusters: *Clusters) anyerror!void {
+        const self: *DbscanClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+        self.noise_points.clearAndFree();
+        clusters.clear();
+    }
+
+    /// Invalid to call if clusters has been modified outside of our clusterer.
+    fn next(clusterer_if: *ClustererIf, points: []const Point, clusters: *Clusters) anyerror!void {
+        const self: *DbscanClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+
+        while (true) {
+            if (self.point_id >= points.len) {
+                return;
+            }
+
+            defer self.point_id += 1;
+
+            if (pointAlreadySeen(self.point_id, self.noise_points.items, clusters) != .unseen) {
+                continue;
+            }
+
+            const neighbors = try rangeQuery(self.alloc, self.point_id, points, self.eps);
+            defer self.alloc.free(neighbors);
+
+            if (neighbors.len < self.min_pts) {
+                continue;
+            }
+
+            const cluster_id = try clusters.addCluster();
+            try clusters.addToCluster(cluster_id, self.point_id);
+
+            for (neighbors) |neighbor_id| {
+                const neighbor_status = pointAlreadySeen(neighbor_id, self.noise_points.items, clusters);
+                switch (neighbor_status) {
+                    .noise_point => |idx| {
+                        _ = self.noise_points.swapRemove(idx);
+                        try clusters.addToCluster(cluster_id, neighbor_id);
+                        continue;
+                    },
+                    .clustered => {
+                        continue;
+                    },
+                    .unseen => {},
+                }
+
+                try clusters.addToCluster(cluster_id, neighbor_id);
+
+                const neighbor_neighbors = try rangeQuery(self.alloc, self.point_id, points, self.eps);
+                defer self.alloc.free(neighbor_neighbors);
+                if (neighbor_neighbors.len >= self.min_pts) {
+                    for (neighbor_neighbors) |neighbor_neighbor| {
+                        const neighbor_neighbor_status = pointAlreadySeen(neighbor_neighbor, self.noise_points.items, clusters);
+                        switch (neighbor_neighbor_status) {
+                            .clustered => |old_cluster_id| {
+                                clusters.removeFromCluster(old_cluster_id, neighbor_neighbor);
+                            },
+                            else => {},
+                        }
+                        try clusters.addToCluster(cluster_id, neighbor_neighbor);
+                    }
+                }
+            }
+
+            var cluster_it = clusters.clusterIt();
+            var to_remove = std.ArrayList(usize).init(self.alloc);
+            defer to_remove.deinit();
+
+            std.debug.print("hello\n", .{});
+            while (cluster_it.next()) |cluster_item| {
+                if (cluster_item.cluster.len < self.min_pts) {
+                    for (cluster_item.cluster) |cluster_point| {
+                        try self.noise_points.append(cluster_point);
+                    }
+                    try to_remove.append(cluster_item.cluster_id);
+                }
+            }
+
+            for (to_remove.items) |id| {
+                std.debug.print("clearing cluster\n", .{});
+                clusters.clearCluster(id);
+            }
+            break;
+        }
+    }
+
+    const PointStatus = union(enum) {
+        noise_point: usize,
+        clustered: usize,
+        unseen: void,
+    };
+
+    fn pointAlreadySeen(point_id: usize, noise_points: []const usize, clusters: *Clusters) PointStatus {
+        var cluster_it = clusters.clusterIt();
+        while (cluster_it.next()) |cluster_item| {
+            if (std.mem.indexOfScalar(usize, cluster_item.cluster, point_id)) |_| {
+                return .{
+                    .clustered = cluster_item.cluster_id,
+                };
+            }
+        }
+
+        if (std.mem.indexOfScalar(usize, noise_points, point_id)) |idx| {
+            return .{
+                .noise_point = idx,
+            };
+        }
+
+        return .unseen;
+    }
+
+    fn rangeQuery(alloc: Allocator, point_id: usize, points: []const Point, eps: f32) ![]const usize {
+        const eps_2 = eps * eps;
+
+        var neighbors = std.ArrayList(usize).init(alloc);
+        errdefer neighbors.deinit();
+
+        for (0..points.len) |i| {
+            if (i == point_id) {
+                continue;
+            }
+
+            if (points[i].distance_2(&points[point_id]) < eps_2) {
+                try neighbors.append(i);
+            }
+        }
+
+        return try neighbors.toOwnedSlice();
+    }
+};
+
 fn clusterMatches(cluster: []const usize, expected: []const usize) bool {
     if (cluster.len != expected.len) {
         return false;
@@ -655,7 +820,14 @@ pub const Clusters = struct {
 
     pub fn addToCluster(self: *Clusters, cluster_id: usize, point_id: usize) !void {
         const cluster = &self.clusters.items[cluster_id];
+        if (std.mem.indexOfScalar(usize, cluster.items, point_id)) |_| {
+            return;
+        }
         try cluster.append(self.arena.allocator(), point_id);
+    }
+
+    pub fn clearCluster(self: *Clusters, cluster_id: usize) void {
+        self.clusters.items[cluster_id].clearAndFree(self.arena.allocator());
     }
 
     pub fn removeFromCluster(self: *Clusters, cluster_id: usize, point_id: usize) void {
@@ -717,6 +889,7 @@ pub const ClustererId = enum {
     agglomerative,
     diana,
     k_means,
+    dbscan,
 };
 
 alloc: Allocator,

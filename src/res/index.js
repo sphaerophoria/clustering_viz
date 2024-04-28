@@ -17,6 +17,20 @@ function resetClusterColors(num_clusters) {
     .map(({ value }) => value);
 }
 
+function renderPoint(ctx, point, color, canvas_scale, canvas_offset) {
+  ctx.beginPath();
+  ctx.arc(
+    point.x * canvas_scale + canvas_offset,
+    point.y * canvas_scale + canvas_offset,
+    10,
+    0,
+    2 * Math.PI,
+  );
+  ctx.fillStyle = color;
+  ctx.fill();
+
+}
+
 async function rerender() {
   const response = await fetch("/data");
   const data = await response.json();
@@ -31,20 +45,15 @@ async function rerender() {
   const canvas_scale = 7;
   const canvas_offset = 25;
 
+  for (const point of data.points) {
+    renderPoint(ctx, point, "black", canvas_scale, canvas_offset);
+  }
+
   for (let cluster_id = 0; cluster_id < data.clusters.length; cluster_id++) {
     const color = cluster_colors[cluster_id];
     for (const point_id of data.clusters[cluster_id]) {
       const point = data.points[point_id];
-      ctx.beginPath();
-      ctx.arc(
-        point.x * canvas_scale + canvas_offset,
-        point.y * canvas_scale + canvas_offset,
-        10,
-        0,
-        2 * Math.PI,
-      );
-      ctx.fillStyle = color;
-      ctx.fill();
+      renderPoint(ctx, point, color, canvas_scale, canvas_offset);
     }
   }
 
@@ -100,7 +109,9 @@ async function reset() {
 async function setClusterer() {
   const clusterer = document.getElementById("clusterer").value;
   const num_means = document.getElementById("num_means").value;
-  await fetch("/set_clusterer?id=" + clusterer + "&num_means=" + num_means);
+  const eps = document.getElementById("eps").value;
+  const min_pts = document.getElementById("min_pts").value;
+  await fetch("/set_clusterer?id=" + clusterer + "&num_means=" + num_means + "&eps=" + eps + "&min_pts=" + min_pts);
   await rerender();
 }
 
@@ -118,6 +129,8 @@ async function populateClusterers() {
   }
   clusterers_select.onchange = setClusterer;
   document.getElementById("num_means").onchange = setClusterer;
+  document.getElementById("eps").onchange = setClusterer;
+  document.getElementById("min_pts").onchange = setClusterer;
 
   setClusterer();
 }
