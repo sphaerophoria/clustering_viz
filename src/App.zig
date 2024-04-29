@@ -638,6 +638,192 @@ pub const DbscanClusterer = struct {
     }
 };
 
+pub const ApClusterer = struct {
+    alloc: Allocator,
+    clusterer_if: ClustererIf,
+    availability: []f32 = &[_]f32{},
+    responsibility: []f32 = &[_]f32{},
+    median_similarity: f32 = 0,
+
+    pub fn init(alloc: Allocator) !*ClustererIf {
+        var clusterer_if = try alloc.create(ApClusterer);
+        errdefer alloc.destroy(clusterer_if);
+
+        clusterer_if.* = .{
+            .alloc = alloc,
+            .clusterer_if = .{ .vtable = .{
+                .next = ApClusterer.next,
+                .reset = ApClusterer.reset,
+                .getDebugData = ApClusterer.getDebugData,
+                .free = ApClusterer.free,
+            } },
+        };
+
+        return &clusterer_if.clusterer_if;
+    }
+
+    fn similarity(median_similarity: f32, a: usize, b: usize, points: []const Point) f32 {
+        if (a == b) {
+            return median_similarity;
+        }
+
+        return -points[a].distance_2(&points[b]);
+    }
+
+    fn free(clusterer_if: *ClustererIf) void {
+        const self: *ApClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+        if (self.responsibility.len > 0) {
+            self.alloc.free(self.responsibility);
+        }
+        if (self.availability.len > 0) {
+            self.alloc.free(self.availability);
+        }
+        self.alloc.destroy(self);
+    }
+
+    fn reset(clusterer_if: *ClustererIf, points: []const Point, _: *Clusters) anyerror!void {
+        const self: *ApClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+
+        if (self.responsibility.len > 0) {
+            self.alloc.free(self.responsibility);
+            self.responsibility = &.{};
+        }
+        if (self.availability.len > 0) {
+            self.alloc.free(self.availability);
+            self.availability = &.{};
+        }
+
+        self.availability = try self.alloc.alloc(f32, points.len * points.len);
+        @memset(self.availability, 0);
+        self.responsibility = try self.alloc.alloc(f32, points.len * points.len);
+        @memset(self.responsibility, 0);
+
+        const point_similarities = try self.alloc.alloc(f32, points.len * points.len / 2);
+        defer self.alloc.free(point_similarities);
+
+        var similarity_idx: usize = 0;
+        for (0..points.len) |a| {
+            for (a + 1..points.len) |b| {
+                // NOTE: similarity function will return an uninitialized
+                // median on a == b, but we guarantee from the above loops
+                // that a will never equal b
+                std.debug.assert(a != b);
+                point_similarities[similarity_idx] = similarity(0, a, b, points);
+                similarity_idx += 1;
+            }
+        }
+
+        std.sort.pdq(f32, point_similarities, {}, std.sort.asc(f32));
+        self.median_similarity = point_similarities[similarity_idx / 2];
+    }
+
+    fn newResponsibility(self: *const ApClusterer, i: usize, k: usize, points: []const Point) f32 {
+        var max_a_plus_s: f32 = -std.math.floatMax(f32);
+        for (0..points.len) |k_prime| {
+            if (k_prime == k) {
+                continue;
+            }
+
+            max_a_plus_s = @max(
+                max_a_plus_s,
+                self.availability[i * points.len + k_prime] + similarity(self.median_similarity, i, k_prime, points),
+            );
+        }
+
+        return similarity(self.median_similarity, i, k, points) - max_a_plus_s;
+    }
+
+    fn newAvailability(self: *const ApClusterer, i: usize, k: usize, points: []const Point) f32 {
+        var ret: f32 = 0;
+        for (0..points.len) |i_prime| {
+            if (i_prime == k or i_prime == i) {
+                continue;
+            }
+
+            ret += @max(0, self.responsibility[i_prime * points.len + k]);
+        }
+
+        if (i == k) {
+            return ret;
+        }
+
+        return @min(0, ret + self.responsibility[k * points.len + k]);
+    }
+
+    fn next(clusterer_if: *ClustererIf, points: []const Point, clusters: *Clusters) anyerror!void {
+        const self: *ApClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+        for (0..points.len) |a| {
+            for (0..points.len) |b| {
+                self.responsibility[a * points.len + b] += self.newResponsibility(a, b, points);
+                // NOTE: Wikipedia does not say to do this, but without a
+                // damping factor it is unstable to the point of being useless.
+                // Other implementations include damping, and supposedly the
+                // paper says that it is necessary as well
+                self.responsibility[a * points.len + b] /= 2.0;
+            }
+        }
+
+        for (0..points.len) |a| {
+            for (0..points.len) |b| {
+                self.availability[a * points.len + b] += self.newAvailability(a, b, points);
+                // NOTE: Wikipedia does not say to do this, but without a
+                // damping factor it is unstable to the point of being useless.
+                // Other implementations include damping, and supposedly the
+                // paper says that it is necessary as well
+                self.availability[a * points.len + b] /= 2.0;
+            }
+        }
+
+        clusters.clear();
+
+        for (0..points.len) |point_id| {
+            if (self.responsibility[point_id * points.len + point_id] + self.availability[point_id * points.len + point_id] > 0) {
+                const cluster_id = try clusters.addCluster();
+                try clusters.addToCluster(cluster_id, point_id);
+            }
+        }
+    }
+    fn getDebugData(clusterer_if: *ClustererIf) anyerror!DebugInfo {
+        const self: *ApClusterer = @fieldParentPtr("clusterer_if", clusterer_if);
+
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        errdefer arena.deinit();
+        const alloc = arena.allocator();
+
+        const availability = try alloc.alloc(DebugInfoElem, self.availability.len);
+
+        for (self.availability, availability) |input, *output| {
+            output.* = .{ .real = input };
+        }
+
+        const responsibility = try alloc.alloc(DebugInfoElem, self.responsibility.len);
+
+        for (self.responsibility, responsibility) |input, *output| {
+            output.* = .{ .real = input };
+        }
+
+        var root = try alloc.alloc(DebugInfoPair, 3);
+        root[0].key = "type";
+        root[0].val = .{
+            .string = "ap",
+        };
+
+        root[1].key = "availability";
+        root[1].val = .{
+            .array = availability,
+        };
+
+        root[2].key = "responsibility";
+        root[2].val = .{
+            .array = responsibility,
+        };
+
+        return .{ .arena = arena, .root = .{
+            .named_vals = root,
+        } };
+    }
+};
+
 fn clusterMatches(cluster: []const usize, expected: []const usize) bool {
     if (cluster.len != expected.len) {
         return false;
@@ -890,6 +1076,7 @@ pub const ClustererId = enum {
     diana,
     k_means,
     dbscan,
+    affinity_propagation,
 };
 
 alloc: Allocator,

@@ -1,4 +1,7 @@
 var cluster_colors = [];
+var data = null;
+const canvas_scale = 7;
+const canvas_offset = 25;
 
 // Clusters can have some initial structure, which results in similar positions
 // naturally having similar colors if we just map cluster id to hue. We store
@@ -28,12 +31,11 @@ function renderPoint(ctx, point, color, canvas_scale, canvas_offset) {
   );
   ctx.fillStyle = color;
   ctx.fill();
-
 }
 
 async function rerender() {
   const response = await fetch("/data");
-  const data = await response.json();
+  data = await response.json();
   if (cluster_colors.length !== data.clusters.length) {
     resetClusterColors(data.clusters.length);
   }
@@ -41,9 +43,6 @@ async function rerender() {
   const canvas = document.getElementById("canvas");
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const canvas_scale = 7;
-  const canvas_offset = 25;
 
   for (const point of data.points) {
     renderPoint(ctx, point, "black", canvas_scale, canvas_offset);
@@ -81,6 +80,23 @@ async function rerender() {
       ctx.stroke();
     }
   }
+
+  if (data.debug.type == "ap") {
+    document.getElementById("ap_debug").style.display = "";
+    const point_selector = document.getElementById("ap_point_selector");
+    point_selector.max = data.points.length - 1;
+    if (point_selector.value > point_selector.max) {
+      point_selector.value = point_selector.max;
+    }
+    var event = new Event("input", {
+      bubbles: true,
+    });
+
+    point_selector.dispatchEvent(event);
+    rerenderApDebug();
+  } else {
+    document.getElementById("ap_debug").style.display = "none";
+  }
 }
 
 async function next() {
@@ -111,7 +127,16 @@ async function setClusterer() {
   const num_means = document.getElementById("num_means").value;
   const eps = document.getElementById("eps").value;
   const min_pts = document.getElementById("min_pts").value;
-  await fetch("/set_clusterer?id=" + clusterer + "&num_means=" + num_means + "&eps=" + eps + "&min_pts=" + min_pts);
+  await fetch(
+    "/set_clusterer?id=" +
+      clusterer +
+      "&num_means=" +
+      num_means +
+      "&eps=" +
+      eps +
+      "&min_pts=" +
+      min_pts,
+  );
   await rerender();
 }
 
@@ -135,8 +160,71 @@ async function populateClusterers() {
   setClusterer();
 }
 
+async function renderApDebugCanvas(canvas, debug_elems) {
+  const selected_point = document.getElementById("ap_point_selector").value;
+
+  const canvas_ctx = canvas.getContext("2d");
+  canvas_ctx.clearRect(0, 0, canvas.width, canvas.height);
+  canvas_ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  renderPoint(
+    canvas_ctx,
+    data.points[selected_point],
+    "yellow",
+    canvas_scale,
+    canvas_offset,
+  );
+
+  const start_idx = selected_point * data.points.length;
+  const end_idx = start_idx + data.points.length;
+  const elems_by_point = debug_elems.slice(start_idx, end_idx);
+
+  const max_availability = Math.max.apply(null, elems_by_point);
+  const min_availability = Math.min.apply(null, elems_by_point);
+  const max_magnitude = Math.max(
+    Math.abs(min_availability),
+    Math.abs(max_availability),
+  );
+
+  for (let point_id = 0; point_id < data.points.length; point_id++) {
+    if (point_id == selected_point) {
+      continue;
+    }
+    const point = data.points[point_id];
+
+    const item_norm = elems_by_point[point_id] / max_magnitude;
+
+    var color = "";
+    if (item_norm > 0) {
+      color = "rgb(0, " + Math.floor(item_norm * 255) + ", 0)";
+    } else {
+      color = "rgb(" + Math.floor(-item_norm * 255) + ", 0, 0)";
+    }
+
+    renderPoint(canvas_ctx, point, color, canvas_scale, canvas_offset);
+  }
+}
+
+async function rerenderApDebug() {
+  if (data.debug.type != "ap") {
+    return;
+  }
+
+  const availability_canvas = document.getElementById("availability_canvas");
+  renderApDebugCanvas(availability_canvas, data.debug.availability);
+  const responsibility_canvas = document.getElementById(
+    "responsibility_canvas",
+  );
+  renderApDebugCanvas(responsibility_canvas, data.debug.responsibility);
+}
+
 window.onload = async function () {
   populateClusterers();
+
+  document.getElementById("ap_point_selector").oninput = function (ev) {
+    document.getElementById("ap_point_val").innerHTML = ev.target.value;
+    rerenderApDebug();
+  };
 
   const next_button = document.getElementById("next");
   next_button.onclick = next;

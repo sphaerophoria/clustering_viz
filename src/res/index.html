@@ -29,5 +29,20 @@
       <input id="min_pts" type="number" value="3" />
     </div>
     <canvas id="canvas" width="750" height="750"></canvas>
+    <div id="ap_debug" style="display: none">
+      <input type="range" min="0" max="100" id="ap_point_selector" />
+      <span id="ap_point_val"></span>
+
+      <div style="display: flex">
+        <div>
+          <h3>Availability</h3>
+          <canvas id="availability_canvas" width="750" height="750"></canvas>
+        </div>
+        <div>
+          <h3>Responsibility</h3>
+          <canvas id="responsibility_canvas" width="750" height="750"></canvas>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

@@ -285,6 +285,9 @@ fn handleHttpRequest(self: *Self, request: *std.http.Server.Request) !void {
                     }
                     new_clusterer = try App.DbscanClusterer.init(self.app.alloc, eps, min_pts);
                 },
+                .affinity_propagation => {
+                    new_clusterer = try App.ApClusterer.init(self.app.alloc);
+                }
             }
             try self.app.setClusterer(new_clusterer);
             try request.respond("", .{
